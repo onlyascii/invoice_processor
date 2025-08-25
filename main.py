@@ -6,6 +6,8 @@ from pypdf import PdfReader
 from enum import Enum
 import os
 import shutil
+import asyncio
+from asyncio import Lock
 
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
@@ -33,23 +35,27 @@ def save_vendors_data(data: dict, filepath: str = "vendors.yaml"):
     except Exception as e:
         print(f"Error: Could not write to vendor file. {e}")
 
-def update_aliases_if_needed(raw_name: str, normalized_name: str, filepath: str = "vendors.yaml"):
-    """Checks if a raw vendor name is a new alias and updates the YAML file if so."""
-    vendors_data = load_vendors_data(filepath)
-    is_new_alias = False
+async def update_aliases_if_needed(raw_name: str, normalized_name: str, lock: Lock, filepath: str = "vendors.yaml"):
+    """
+    Atomically checks if a raw vendor name is a new alias and updates the YAML file if so.
+    Uses a lock to prevent race conditions during concurrent file access.
+    """
+    async with lock:
+        # This block can only be executed by one task at a time.
+        vendors_data = load_vendors_data(filepath)
+        is_new_alias = False
 
-    for vendor_group in vendors_data.get("vendors", []):
-        if vendor_group.get("name") == normalized_name:
-            # Check if the raw name is already in the aliases (case-insensitive)
-            existing_aliases = [str(a).lower() for a in vendor_group.get("aliases", [])]
-            if raw_name.lower() not in existing_aliases and raw_name.lower() != normalized_name.lower():
-                print(f"Found new alias '{raw_name}' for vendor '{normalized_name}'.")
-                vendor_group.setdefault("aliases", []).append(raw_name)
-                is_new_alias = True
-            break # Found the correct vendor group
+        for vendor_group in vendors_data.get("vendors", []):
+            if vendor_group.get("name") == normalized_name:
+                existing_aliases = [str(a).lower() for a in vendor_group.get("aliases", [])]
+                if raw_name.lower() not in existing_aliases and raw_name.lower() != normalized_name.lower():
+                    print(f"Found new alias '{raw_name}' for vendor '{normalized_name}'. Updating config.")
+                    vendor_group.setdefault("aliases", []).append(raw_name)
+                    is_new_alias = True
+                break
 
-    if is_new_alias:
-        save_vendors_data(vendors_data, filepath)
+        if is_new_alias:
+            save_vendors_data(vendors_data, filepath)
 
 def sanitize_filename_part(part: str) -> str:
     """Removes characters that are invalid in filenames."""
@@ -87,63 +93,58 @@ class InvoiceDetails(BaseModel):
 
         return f"{safe_vendor}-{date_str}-{self.item_count}-{safe_category}-{self.total_amount:.2f}-{self.total_vat:.2f}.pdf"
 
-def process_invoice(file_path: str, model: str, output_dir: str) -> None:
+async def process_invoice(file_path: str, output_dir: str, normalized_agent: Agent, raw_agent: Agent, lock: Lock) -> None:
+    """Asynchronously processes a single PDF file using shared agents and a file lock."""
     try:
+        print(f"Starting processing for: {os.path.basename(file_path)}")
         reader = PdfReader(file_path)
         text_content = "".join(page.extract_text() + "\n" for page in reader.pages)
         if not text_content.strip():
-            print("Could not extract any text from the PDF.")
+            print(f"Could not extract any text from {os.path.basename(file_path)}.")
             return
 
-        ollama_model = OpenAIModel(model_name=model, provider=OllamaProvider(base_url='http://localhost:11434/v1'))
+        # Agents are now passed in, so we don't create them here.
 
-        # --- 1. First Pass: Normalize and Extract Details ---
-        print("\n--- Pass 1: Normalizing invoice details ---")
+        # --- 1. First Pass: Normalize and Extract Details (Async) ---
         norm_prompt = (
             f"From the invoice text below, extract the required information. "
             f"For the vendor, you must choose one of the following canonical names: {canonical_vendor_names}. "
             f"Map the vendor found in the text to the most appropriate name from that list.\n\n"
             f"Invoice Text:\n{text_content}"
         )
-        normalized_agent = Agent(ollama_model, output_type=InvoiceDetails)
-        normalized_result = normalized_agent.run_sync(norm_prompt)
+        normalized_result = await normalized_agent.run(norm_prompt)
 
         if not normalized_result:
-            print("Failed to extract normalized invoice details.")
+            print(f"Failed to extract normalized details for {os.path.basename(file_path)}.")
             return
 
-        # --- 2. Second Pass: Extract Raw Vendor Name ---
-        print("\n--- Pass 2: Extracting verbatim vendor name ---")
+        # --- 2. Second Pass: Extract Raw Vendor Name (Async) ---
         raw_prompt = f"From the following text, extract the exact, verbatim vendor name as it appears in the document.\n\n{text_content}"
-        raw_agent = Agent(ollama_model, output_type=RawVendor)
-        raw_result = raw_agent.run_sync(raw_prompt)
+        raw_result = await raw_agent.run(raw_prompt)
 
-        # --- 3. Compare and Update YAML ---
-        if raw_result:
-            update_aliases_if_needed(
+        # --- 3. Compare and Update YAML (Atomically) ---
+        # Robustly check if both AI calls were successful before proceeding
+        if raw_result and raw_result.output and normalized_result and normalized_result.output:
+            await update_aliases_if_needed(
                 raw_name=raw_result.output.verbatim_vendor_name,
-                normalized_name=normalized_result.output.vendor.value
+                normalized_name=normalized_result.output.vendor.value,
+                lock=lock
             )
-
-        new_filename = normalized_result.output.to_filename()
-        print(f"\n--- Generated Filename (AI Normalized) ---")
-        print(new_filename)
+            new_filename = normalized_result.output.to_filename()
+        else:
+            print(f"❌ Could not generate filename for {os.path.basename(file_path)} due to incomplete AI response.")
+            return
 
         # --- 4. Copy file to output directory ---
-        # Ensure the output directory exists
         os.makedirs(output_dir, exist_ok=True)
-
-        # Construct the full destination path
         destination_path = os.path.join(output_dir, new_filename)
-
-        # Copy the original file to the new destination with the new name
         shutil.copy(file_path, destination_path)
-        print(f"\nSuccessfully copied and renamed invoice to:\n{destination_path}")
+        print(f"✅ Successfully processed and saved: {new_filename}")
 
     except Exception as e:
-        print(f"An error occurred while processing {os.path.basename(file_path)}: {e}")
+        print(f"❌ An error occurred while processing {os.path.basename(file_path)}: {e}")
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Extracts invoice data from PDF files and renames them.")
 
     # Create a mutually exclusive group. One of these arguments is required.
@@ -160,24 +161,32 @@ def main():
     )
     args = parser.parse_args()
 
+    # --- Create shared resources once, including the lock ---
+    lock = Lock()
+    ollama_model = OpenAIModel(model_name=args.model, provider=OllamaProvider(base_url='http://localhost:11434/v1'))
+    normalized_agent = Agent(ollama_model, output_type=InvoiceDetails)
+    raw_agent = Agent(ollama_model, output_type=RawVendor)
+
+
     if args.file:
-        # Process a single file
-        print(f"--- Processing single file: {args.file} ---")
-        process_invoice(args.file, args.model, args.output_dir)
+        await process_invoice(args.file, args.output_dir, normalized_agent, raw_agent, lock)
     elif args.folder:
-        # Process a whole folder
-        print(f"--- Processing folder: {args.folder} ---")
         if not os.path.isdir(args.folder):
             print(f"Error: Folder not found at '{args.folder}'")
             return
 
+        # Create a list of tasks to run concurrently
+        tasks = []
         for filename in sorted(os.listdir(args.folder)):
             if filename.lower().endswith(".pdf"):
                 file_path = os.path.join(args.folder, filename)
-                print(f"\n----------------------------------\n>>> Processing: {file_path} <<<")
-                process_invoice(file_path, args.model, args.output_dir)
-            else:
-                print(f"Skipping non-PDF file: {filename}")
+                tasks.append(process_invoice(file_path, args.output_dir, normalized_agent, raw_agent, lock))
+
+        # Run all tasks concurrently and wait for them to complete
+        print(f"--- Found {len(tasks)} PDF files. Processing concurrently... ---")
+        await asyncio.gather(*tasks)
+        print("\n--- All files processed. ---")
 
 if __name__ == "__main__":
-    main()
+    # Run the async main function
+    asyncio.run(main())

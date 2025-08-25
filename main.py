@@ -93,7 +93,7 @@ class InvoiceDetails(BaseModel):
 
         return f"{safe_vendor}-{date_str}-{self.item_count}-{safe_category}-{self.total_amount:.2f}-{self.total_vat:.2f}.pdf"
 
-async def process_invoice(file_path: str, output_dir: str, normalized_agent: Agent, raw_agent: Agent, lock: Lock) -> None:
+async def process_invoice(file_path: str, output_dir: str, normalized_agent: Agent[None, InvoiceDetails], raw_agent: Agent[None, RawVendor], lock: Lock) -> None:
     """Asynchronously processes a single PDF file using shared agents and a file lock."""
     try:
         print(f"Starting processing for: {os.path.basename(file_path)}")
@@ -112,7 +112,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
             f"Map the vendor found in the text to the most appropriate name from that list.\n\n"
             f"Invoice Text:\n{text_content}"
         )
-        normalized_result = await normalized_agent.run(norm_prompt, output_type=InvoiceDetails)
+        normalized_result = await normalized_agent.run(norm_prompt)
 
         if not normalized_result:
             print(f"Failed to extract normalized details for {os.path.basename(file_path)}.")
@@ -120,7 +120,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
 
         # --- 2. Second Pass: Extract Raw Vendor Name (Async) ---
         raw_prompt = f"From the following text, extract the exact, verbatim vendor name as it appears in the document.\n\n{text_content}"
-        raw_result = await raw_agent.run(raw_prompt, output_type=RawVendor)
+        raw_result = await raw_agent.run(raw_prompt)
 
         # --- 3. Compare and Update YAML (Atomically) ---
         # Robustly check if both AI calls were successful before proceeding

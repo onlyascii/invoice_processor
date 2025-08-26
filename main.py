@@ -8,6 +8,8 @@ import os
 import shutil
 import asyncio
 from asyncio import Lock
+import time
+import logging
 
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
@@ -42,9 +44,9 @@ def save_vendors_data(data: dict, filepath: str = "vendors.yaml"):
     try:
         with open(filepath, 'w') as f:
             yaml.dump(data, f, allow_unicode=True, sort_keys=False)
-        print(f"Successfully updated vendor file: {filepath}")
+        logging.info(f"Successfully updated vendor file: {filepath}")
     except Exception as e:
-        print(f"Error: Could not write to vendor file. {e}")
+        logging.error(f"Error: Could not write to vendor file. {e}")
 
 async def update_aliases_if_needed(raw_name: str, normalized_name: str, lock: Lock, filepath: str = "vendors.yaml"):
     """
@@ -66,12 +68,12 @@ async def update_aliases_if_needed(raw_name: str, normalized_name: str, lock: Lo
             # Existing vendor: check for new aliases
             existing_aliases = [str(a).lower() for a in vendor_group.get("aliases", [])]
             if raw_name.lower() not in existing_aliases and raw_name.lower() != simplified_name.lower():
-                print(f"Found new alias '{raw_name}' for vendor '{simplified_name}'. Updating config.")
+                logging.info(f"Found new alias '{raw_name}' for vendor '{simplified_name}'. Updating config.")
                 vendor_group.setdefault("aliases", []).append(raw_name)
                 file_was_modified = True
         else:
             # New vendor: add a new entry
-            print(f"Found new vendor '{simplified_name}'. Adding to config.")
+            logging.info(f"Found new vendor '{simplified_name}'. Adding to config.")
             new_vendor = {"name": simplified_name, "aliases": []}
             # Add the raw name as the first alias if it's different
             if raw_name.lower() != simplified_name.lower():
@@ -120,12 +122,13 @@ class InvoiceDetails(BaseModel):
 
 async def process_invoice(file_path: str, output_dir: str, normalized_agent: Agent[None, InvoiceDetails], raw_agent: Agent[None, RawVendor], lock: Lock, move_file: bool = False) -> None:
     """Asynchronously processes a single PDF file using shared agents and a file lock."""
+    start_time = time.time()
     try:
-        print(f"Starting processing for: {os.path.basename(file_path)}")
+        logging.info(f"Starting processing for: {os.path.basename(file_path)}")
         reader = PdfReader(file_path)
         text_content = "".join(page.extract_text() + "\n" for page in reader.pages)
         if not text_content.strip():
-            print(f"Could not extract any text from {os.path.basename(file_path)}.")
+            logging.warning(f"Could not extract any text from {os.path.basename(file_path)}.")
             return
 
         # Agents are now passed in, so we don't create them here.
@@ -140,7 +143,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
         normalized_result = await normalized_agent.run(norm_prompt)
 
         if not normalized_result:
-            print(f"Failed to extract normalized details for {os.path.basename(file_path)}.")
+            logging.error(f"Failed to extract normalized details for {os.path.basename(file_path)}.")
             return
 
         # --- 2. Second Pass: Extract Raw Vendor Name (Async) ---
@@ -157,7 +160,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
             )
             new_filename = normalized_result.output.to_filename()
         else:
-            print(f"❌ Could not generate filename for {os.path.basename(file_path)} due to incomplete AI response.")
+            logging.error(f"❌ Could not generate filename for {os.path.basename(file_path)} due to incomplete AI response.")
             return
 
         # --- 4. Move or copy file to output directory ---
@@ -165,13 +168,17 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
         destination_path = os.path.join(output_dir, new_filename)
         if move_file:
             shutil.move(file_path, destination_path)
-            print(f"✅ Successfully processed and moved: {new_filename}")
+            logging.info(f"✅ Successfully processed and moved: {new_filename}")
         else:
             shutil.copy(file_path, destination_path)
-            print(f"✅ Successfully processed and copied: {new_filename}")
+            logging.info(f"✅ Successfully processed and copied: {new_filename}")
 
     except Exception as e:
-        print(f"❌ An error occurred while processing {os.path.basename(file_path)}: {e}")
+        logging.error(f"❌ An error occurred while processing {os.path.basename(file_path)}: {e}")
+    finally:
+        duration = time.time() - start_time
+        logging.info(f"Finished processing {os.path.basename(file_path)} in {duration:.2f} seconds.")
+
 
 async def main():
     parser = argparse.ArgumentParser(description="Extracts invoice data from PDF files and renames them.")
@@ -193,7 +200,32 @@ async def main():
         action="store_true",
         help="Move successfully processed files to the output directory instead of copying."
     )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default="processing_log.txt",
+        help="Path to the log file for performance metrics."
+    )
     args = parser.parse_args()
+
+    # --- Setup Logging ---
+    # Remove all handlers associated with the root logger object to avoid conflicts.
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # Configure logging to write to a file and the console.
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(message)s',
+        filename=args.log_file,
+        filemode='a'  # Append to the log file on each run
+    )
+    # Add a handler to also print log messages to the console
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter('%(message)s')) # Console logs are simpler
+    logging.getLogger().addHandler(console_handler)
+
+    total_start_time = time.time()
 
     # --- Create shared resources once, including the lock ---
     lock = Lock()
@@ -206,7 +238,7 @@ async def main():
         await process_invoice(args.file, args.output_dir, normalized_agent, raw_agent, lock, args.move)
     elif args.folder:
         if not os.path.isdir(args.folder):
-            print(f"Error: Folder not found at '{args.folder}'")
+            logging.error(f"Error: Folder not found at '{args.folder}'")
             return
 
         # Create a list of tasks to run concurrently
@@ -217,9 +249,12 @@ async def main():
                 tasks.append(process_invoice(file_path, args.output_dir, normalized_agent, raw_agent, lock, args.move))
 
         # Run all tasks concurrently and wait for them to complete
-        print(f"--- Found {len(tasks)} PDF files. Processing concurrently... ---")
+        logging.info(f"--- Found {len(tasks)} PDF files. Processing concurrently... ---")
         await asyncio.gather(*tasks)
-        print("\n--- All files processed. ---")
+        logging.info("\n--- All files processed. ---")
+
+    total_duration = time.time() - total_start_time
+    logging.info(f"--- Total execution time: {total_duration:.2f} seconds ---")
 
 if __name__ == "__main__":
     # Run the async main function

@@ -15,6 +15,11 @@ import logging
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.ollama import OllamaProvider
+from textual.app import App, ComposeResult
+from textual.containers import Container
+from textual.widgets import Header, Footer, RichLog, SelectionList
+from textual.binding import Binding
+from textual import work
 
 # --- Model for Raw Vendor Extraction ---
 class RawVendor(BaseModel):
@@ -181,6 +186,108 @@ async def process_invoice(file_path: str, output_dir: str, context: ProcessingCo
         duration = end_time - start_time
         logging.info(f"🏁 Finished processing {os.path.basename(file_path)} in {duration:.2f} seconds.")
 
+
+class TuiLogHandler(logging.Handler):
+    """A logging handler that sends records to a Textual RichLog widget."""
+    def __init__(self, rich_log: RichLog):
+        super().__init__()
+        self.rich_log = rich_log
+
+    def emit(self, record):
+        msg = self.format(record)
+        # Use the write method to add the log message to the widget
+        self.rich_log.write(msg)
+
+class InvoiceProcessorApp(App):
+    """A Textual app for interactively processing invoices."""
+
+    CSS = """
+    #main-container {
+        layout: horizontal;
+        height: 1fr;
+    }
+    SelectionList {
+        width: 40%;
+        border-right: solid $accent;
+    }
+    RichLog {
+        width: 60%;
+    }
+    """
+
+    BINDINGS = [
+        Binding("q", "quit", "Quit", priority=True),
+        Binding("p", "process_selected", "Process Selected"),
+        Binding("space", "toggle_selection", "Toggle Selection", show=False),
+    ]
+
+    def __init__(self, files_to_process: list[str], context: ProcessingContext, move_files: bool, output_dir: str):
+        super().__init__()
+        self.files_to_process = files_to_process
+        self.processing_context = context
+        self.move_files = move_files
+        self.output_dir = output_dir
+        self.selected_files = set()
+
+    def compose(self) -> ComposeResult:
+        """Create child widgets for the app."""
+        yield Header()
+        with Container(id="main-container"):
+            yield SelectionList[str](id="file_list")
+            yield RichLog(id="log_window", wrap=True, highlight=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Called when the app is mounted."""
+        selection_list = self.query_one(SelectionList)
+        for file_path in self.files_to_process:
+            selection_list.add_option((os.path.basename(file_path), file_path))
+
+        # Configure logging to use the TUI handler
+        log_window = self.query_one(RichLog)
+        tui_handler = TuiLogHandler(log_window)
+        tui_handler.setFormatter(logging.Formatter('%(message)s'))
+
+        # We remove all other handlers to only log to the TUI
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+        root_logger.addHandler(tui_handler)
+        root_logger.setLevel(logging.INFO)
+
+        log_window.write("App initialized. Press 'space' to select files, 'p' to process, 'q' to quit.")
+
+    def action_toggle_selection(self) -> None:
+        """Toggle the selection of the currently highlighted file."""
+        selection_list = self.query_one(SelectionList)
+        if selection_list.highlighted_child:
+            selection_list.toggle_option(selection_list.highlighted_child.id)
+
+    def action_process_selected(self) -> None:
+        """Start processing the selected files."""
+        selection_list = self.query_one(SelectionList)
+        selected_items = selection_list.selected
+
+        if not selected_items:
+            self.query_one(RichLog).write("[bold red]No files selected. Press 'space' to select files.[/bold red]")
+            return
+
+        files_to_run = selected_items
+        self.query_one(RichLog).write(f"[bold]Starting processing for {len(files_to_run)} files...[/bold]")
+        self.run_processing(files_to_run)
+
+    @work(exclusive=True, group="processing")
+    async def run_processing(self, files: list[str]) -> None:
+        """The background worker for processing invoice files."""
+        tasks = []
+        for file_path in files:
+            tasks.append(process_invoice(file_path, self.output_dir, self.processing_context, self.move_files))
+
+        await asyncio.gather(*tasks)
+
+        logging.info("\n--- [bold green]All selected files processed.[/bold green] ---")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Process one or more invoices using an AI model.")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -217,13 +324,50 @@ async def main():
         default=None,
         help="Path to a file to log script arguments in JSONL format. If provided, enables argument logging."
     )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Enable Textual TUI for interactive folder processing."
+    )
     args = parser.parse_args()
 
-    # --- Setup Logging ---
-    # Remove all handlers associated with the root logger object to avoid conflicts.
+    # --- Create shared resources once ---
+    context = ProcessingContext(model_name=args.model, ollama_url=args.ollama_url)
+
+    # --- TUI Mode ---
+    if args.tui:
+        if not args.folder:
+            print("Error: --tui mode is only available with --folder.")
+            return
+
+        if not os.path.isdir(args.folder):
+            print(f"Error: Folder not found at '{args.folder}'")
+            return
+
+        files_to_process = [
+            os.path.join(args.folder, f)
+            for f in sorted(os.listdir(args.folder))
+            if f.lower().endswith(".pdf")
+        ]
+
+        if not files_to_process:
+            print(f"No PDF files found in '{args.folder}'.")
+            return
+
+        app = InvoiceProcessorApp(
+            files_to_process=files_to_process,
+            context=context,
+            move_files=args.move,
+            output_dir=args.output_dir
+        )
+        await app.run_async()
+        return
+
+    # --- Non-TUI (CLI) Mode ---
+    # Setup Logging
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
-    
+
     # Configure logging to write to a file and the console.
     logging.basicConfig(
         level=logging.INFO,
@@ -282,7 +426,7 @@ async def main():
                 "files_processed": len(files_to_process),
                 "total_duration_seconds": round(total_duration, 2)
             }
-            
+
             log_file_path = args.args_log_file
             log_data = []
 
@@ -297,7 +441,7 @@ async def main():
                     except json.JSONDecodeError:
                         logging.warning(f"Could not decode JSON from '{log_file_path}'. The file will be overwritten.")
                         log_data = []
-            
+
             # Append new run info
             log_data.append(run_info)
 

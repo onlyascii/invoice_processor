@@ -10,4 +10,5 @@ dependencies = [
     "pydantic-ai[ollama]>=0.7.5",
     "pypdf>=6.0.0",
     "pyyaml>=6.0.2",
+    "textual>=5.3.0",
 ]

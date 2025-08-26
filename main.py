@@ -96,14 +96,6 @@ def sanitize_filename_part(part: str) -> str:
     # Remove leading/trailing whitespace, dots, and underscores
     return sanitized_part.strip('._ ')
 
-# --- Dynamic Enum and Pydantic Models ---
-# We are removing the dynamic Enum creation to allow the AI to propose new canonical names.
-# vendors_data = load_vendors_data()
-# canonical_vendor_names = [v.get("name") for v in vendors_data.get("vendors", []) if v.get("name")]
-# if not canonical_vendor_names:
-#     canonical_vendor_names = ["Unknown"]
-# VendorEnum = Enum("VendorEnum", {name: name for name in canonical_vendor_names})
-
 class InvoiceDetails(BaseModel):
     vendor: str = Field(..., description="A clean, canonical name for the vendor (e.g., 'Amazon Web Services', 'Google', 'Microsoft').")
     invoice_date: date = Field(..., description="The date the invoice was issued in YYYY-MM-DD format.")
@@ -122,8 +114,16 @@ class InvoiceDetails(BaseModel):
 
         return f"{safe_vendor}-{date_str}-{self.item_count}-{safe_category}-{self.total_amount:.2f}-{self.total_vat:.2f}.pdf"
 
-async def process_invoice(file_path: str, output_dir: str, normalized_agent: Agent[None, InvoiceDetails], raw_agent: Agent[None, RawVendor], lock: Lock, move_file: bool = False) -> None:
-    """Asynchronously processes a single PDF file using shared agents and a file lock."""
+class ProcessingContext:
+    """A container for shared resources used during invoice processing."""
+    def __init__(self, model_name: str, ollama_url: str):
+        self.lock = Lock()
+        self.ollama_model = OpenAIModel(model_name=model_name, provider=OllamaProvider(base_url=ollama_url))
+        self.normalized_agent = Agent(self.ollama_model, output_type=InvoiceDetails)
+        self.raw_agent = Agent(self.ollama_model, output_type=RawVendor)
+
+async def process_invoice(file_path: str, output_dir: str, context: ProcessingContext, move_file: bool = False) -> None:
+    """Asynchronously processes a single PDF file using a shared processing context."""
     start_time = time.time()
     try:
         logging.info(f"Starting processing for: {os.path.basename(file_path)}")
@@ -133,8 +133,6 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
             logging.warning(f"Could not extract any text from {os.path.basename(file_path)}.")
             return
 
-        # Agents are now passed in, so we don't create them here.
-
         # --- 1. First Pass: Normalize and Extract Details (Async) ---
         norm_prompt = (
             f"From the invoice text below, extract the required information. "
@@ -142,7 +140,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
             f"'Amazon Business EU S.à.r.l, UK Branch', the canonical name should be 'Amazon Business'.\n\n"
             f"Invoice Text:\n{text_content}"
         )
-        normalized_result = await normalized_agent.run(norm_prompt)
+        normalized_result = await context.normalized_agent.run(norm_prompt)
 
         if not normalized_result:
             logging.error(f"Failed to extract normalized details for {os.path.basename(file_path)}.")
@@ -150,7 +148,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
 
         # --- 2. Second Pass: Extract Raw Vendor Name (Async) ---
         raw_prompt = f"From the following text, extract the exact, verbatim vendor name as it appears in the document.\n\n{text_content}"
-        raw_result = await raw_agent.run(raw_prompt)
+        raw_result = await context.raw_agent.run(raw_prompt)
 
         # --- 3. Compare and Update YAML (Atomically) ---
         # Robustly check if both AI calls were successful before proceeding
@@ -158,7 +156,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
             await update_aliases_if_needed(
                 raw_name=raw_result.output.verbatim_vendor_name,
                 normalized_name=normalized_result.output.vendor,
-                lock=lock
+                lock=context.lock
             )
             new_filename = normalized_result.output.to_filename()
         else:
@@ -190,6 +188,12 @@ async def main():
     group.add_argument("--folder", type=str, help="The path to a folder containing PDF files to be processed.")
 
     parser.add_argument("--model", type=str, default="qwen3", help="The model to use for processing.")
+    parser.add_argument(
+        "--ollama-url",
+        type=str,
+        default="http://localhost:11434/v1",
+        help="The base URL for the Ollama API."
+    )
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -239,16 +243,12 @@ async def main():
     total_start_time = time.time()
     files_to_process = []
 
-    # --- Create shared resources once, including the lock ---
-    lock = Lock()
-    ollama_model = OpenAIModel(model_name=args.model, provider=OllamaProvider(base_url='http://localhost:11434/v1'))
-    normalized_agent = Agent(ollama_model, output_type=InvoiceDetails)
-    raw_agent = Agent(ollama_model, output_type=RawVendor)
-
+    # --- Create shared resources once ---
+    context = ProcessingContext(model_name=args.model, ollama_url=args.ollama_url)
 
     if args.file:
         files_to_process.append(args.file)
-        await process_invoice(args.file, args.output_dir, normalized_agent, raw_agent, lock, args.move)
+        await process_invoice(args.file, args.output_dir, context, args.move)
     elif args.folder:
         if not os.path.isdir(args.folder):
             logging.error(f"Error: Folder not found at '{args.folder}'")
@@ -260,7 +260,7 @@ async def main():
             if filename.lower().endswith(".pdf"):
                 file_path = os.path.join(args.folder, filename)
                 files_to_process.append(file_path)
-                tasks.append(process_invoice(file_path, args.output_dir, normalized_agent, raw_agent, lock, args.move))
+                tasks.append(process_invoice(file_path, args.output_dir, context, args.move))
 
         # Run all tasks concurrently and wait for them to complete
         if tasks:

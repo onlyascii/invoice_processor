@@ -275,8 +275,29 @@ async def main():
                 "arguments": vars(args),
                 "total_duration_seconds": round(total_duration, 2)
             }
-            with open(args.args_log_file, 'a') as f:
-                f.write(json.dumps(run_info) + '\n')
+            
+            log_file_path = args.args_log_file
+            log_data = []
+
+            # Read existing data if the file is not empty
+            if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 0:
+                with open(log_file_path, 'r') as f:
+                    try:
+                        log_data = json.load(f)
+                        if not isinstance(log_data, list):
+                            logging.warning(f"Log file '{log_file_path}' does not contain a JSON array. It will be overwritten.")
+                            log_data = []
+                    except json.JSONDecodeError:
+                        logging.warning(f"Could not decode JSON from '{log_file_path}'. The file will be overwritten.")
+                        log_data = []
+            
+            # Append new run info
+            log_data.append(run_info)
+
+            # Write the updated data back to the file
+            with open(log_file_path, 'w') as f:
+                json.dump(log_data, f, indent=4)
+
         except Exception as e:
             logging.error(f"Error: Could not write to arguments log file: {e}")
 

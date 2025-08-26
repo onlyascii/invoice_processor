@@ -1,7 +1,8 @@
 import argparse
+import json
 import yaml
 from pydantic import BaseModel, Field
-from datetime import date
+from datetime import date, datetime
 from pypdf import PdfReader
 from enum import Enum
 import os
@@ -206,6 +207,12 @@ async def main():
         default="processing_log.txt",
         help="Path to the log file for performance metrics."
     )
+    parser.add_argument(
+        "--args-log-file",
+        type=str,
+        default=None,
+        help="Path to a file to log script arguments in JSONL format. If provided, enables argument logging."
+    )
     args = parser.parse_args()
 
     # --- Setup Logging ---
@@ -255,6 +262,19 @@ async def main():
 
     total_duration = time.time() - total_start_time
     logging.info(f"--- Total execution time: {total_duration:.2f} seconds ---")
+
+    # --- Log arguments and performance to a separate file if requested ---
+    if args.args_log_file:
+        try:
+            run_info = {
+                "timestamp": datetime.now().isoformat(),
+                "arguments": vars(args),
+                "total_duration_seconds": round(total_duration, 2)
+            }
+            with open(args.args_log_file, 'a') as f:
+                f.write(json.dumps(run_info) + '\n')
+        except Exception as e:
+            logging.error(f"Error: Could not write to arguments log file: {e}")
 
 if __name__ == "__main__":
     # Run the async main function

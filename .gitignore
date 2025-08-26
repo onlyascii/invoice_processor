@@ -11,3 +11,4 @@ wheels/
 /ai
 vendors.yaml
 .DS_Store
+/processed_invoices

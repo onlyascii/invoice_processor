@@ -14,11 +14,34 @@ An AI-powered invoice processing and organization system that automatically extr
 
 ## Installation
 
+### Option 1: Using uv (Recommended)
+
 ```bash
-# Install with uv (recommended)
+# uv automatically manages virtual environments
 uv install
 
-# Or install with pip in editable mode
+# Or sync dependencies if you've cloned the repo
+uv sync
+```
+
+### Option 2: Using pip with virtual environment
+
+```bash
+# Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install in editable mode
+pip install -e .
+
+# Optional: Install GPU monitoring support
+pip install -e .[gpu]
+```
+
+### Option 3: Using pip globally (not recommended)
+
+```bash
+# Only if you want to install globally (not recommended for development)
 pip install -e .
 
 # Optional: Install GPU monitoring support

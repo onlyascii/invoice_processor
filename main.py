@@ -18,13 +18,24 @@ class RawVendor(BaseModel):
     verbatim_vendor_name: str = Field(..., description="The exact, verbatim name of the vendor as it appears in the document.")
 
 def load_vendors_data(filepath: str = "vendors.yaml") -> dict:
-    """Loads the entire vendor data structure from the YAML file."""
+    """
+    Loads vendor data from a YAML file. If the file doesn't exist, it creates one
+    with a default structure to prevent crashes.
+    """
     try:
         with open(filepath, 'r') as f:
-            return yaml.safe_load(f) or {"vendors": []}
+            data = yaml.safe_load(f)
+            # Ensure the basic structure is present
+            if isinstance(data, dict) and "vendors" in data and isinstance(data["vendors"], list):
+                return data
+            # If file is empty or malformed, return a default structure
+            print(f"Warning: Vendor file '{filepath}' is empty or malformed. Using default structure.")
+            return {"vendors": []}
     except FileNotFoundError:
-        print(f"Warning: Vendor file '{filepath}' not found. Starting with an empty list.")
-        return {"vendors": []}
+        print(f"Info: Vendor file '{filepath}' not found. Creating a new one.")
+        default_data = {"vendors": []}
+        save_vendors_data(default_data, filepath)
+        return default_data
 
 def save_vendors_data(data: dict, filepath: str = "vendors.yaml"):
     """Saves the vendor data structure back to the YAML file."""
@@ -37,24 +48,38 @@ def save_vendors_data(data: dict, filepath: str = "vendors.yaml"):
 
 async def update_aliases_if_needed(raw_name: str, normalized_name: str, lock: Lock, filepath: str = "vendors.yaml"):
     """
-    Atomically checks if a raw vendor name is a new alias and updates the YAML file if so.
+    Atomically updates the vendor file. If the normalized vendor exists, it adds a new alias.
+    If the normalized vendor does not exist, it creates a new vendor entry.
     Uses a lock to prevent race conditions during concurrent file access.
     """
     async with lock:
-        # This block can only be executed by one task at a time.
         vendors_data = load_vendors_data(filepath)
-        is_new_alias = False
+        vendors_list = vendors_data.get("vendors", [])
+        file_was_modified = False
 
-        for vendor_group in vendors_data.get("vendors", []):
-            if vendor_group.get("name") == normalized_name:
-                existing_aliases = [str(a).lower() for a in vendor_group.get("aliases", [])]
-                if raw_name.lower() not in existing_aliases and raw_name.lower() != normalized_name.lower():
-                    print(f"Found new alias '{raw_name}' for vendor '{normalized_name}'. Updating config.")
-                    vendor_group.setdefault("aliases", []).append(raw_name)
-                    is_new_alias = True
-                break
+        # Sanitize the normalized name to be used as a primary key
+        simplified_name = sanitize_filename_part(normalized_name).replace('_', ' ').title()
 
-        if is_new_alias:
+        vendor_group = next((v for v in vendors_list if v.get("name") == simplified_name), None)
+
+        if vendor_group:
+            # Existing vendor: check for new aliases
+            existing_aliases = [str(a).lower() for a in vendor_group.get("aliases", [])]
+            if raw_name.lower() not in existing_aliases and raw_name.lower() != simplified_name.lower():
+                print(f"Found new alias '{raw_name}' for vendor '{simplified_name}'. Updating config.")
+                vendor_group.setdefault("aliases", []).append(raw_name)
+                file_was_modified = True
+        else:
+            # New vendor: add a new entry
+            print(f"Found new vendor '{simplified_name}'. Adding to config.")
+            new_vendor = {"name": simplified_name, "aliases": []}
+            # Add the raw name as the first alias if it's different
+            if raw_name.lower() != simplified_name.lower():
+                new_vendor["aliases"].append(raw_name)
+            vendors_list.append(new_vendor)
+            file_was_modified = True
+
+        if file_was_modified:
             save_vendors_data(vendors_data, filepath)
 
 def sanitize_filename_part(part: str) -> str:

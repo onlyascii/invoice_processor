@@ -178,22 +178,10 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
     except Exception as e:
         logging.error(f"❌ An error occurred while processing {os.path.basename(file_path)}: {e}")
     finally:
-        # This block ensures the log is written even if errors occur during processing.
+        # This block ensures the duration is logged for each file.
         end_time = time.time()
-        total_duration = end_time - start_time
-        logging.info(f"🏁 Finished processing run in {total_duration:.2f} seconds.")
-
-        # Log arguments and performance summary
-        if args.args_log_file:
-            # The list of files to process was determined at the start of main()
-            files_processed_count = len(files_to_process)
-            log_entry = {
-                "timestamp": datetime.now().isoformat(),
-                "arguments": {k: v for k, v in vars(args).items()},
-                "files_processed": files_processed_count,
-                "total_duration_seconds": round(total_duration, 2)
-            }
-            log_arguments(args.args_log_file, log_entry)
+        duration = end_time - start_time
+        logging.info(f"🏁 Finished processing {os.path.basename(file_path)} in {duration:.2f} seconds.")
 
 async def main():
     parser = argparse.ArgumentParser(description="Process one or more invoices using an AI model.")
@@ -249,6 +237,7 @@ async def main():
     logging.getLogger("ollama").setLevel(logging.WARNING)
 
     total_start_time = time.time()
+    files_to_process = []
 
     # --- Create shared resources once, including the lock ---
     lock = Lock()
@@ -258,6 +247,7 @@ async def main():
 
 
     if args.file:
+        files_to_process.append(args.file)
         await process_invoice(args.file, args.output_dir, normalized_agent, raw_agent, lock, args.move)
     elif args.folder:
         if not os.path.isdir(args.folder):
@@ -269,12 +259,16 @@ async def main():
         for filename in sorted(os.listdir(args.folder)):
             if filename.lower().endswith(".pdf"):
                 file_path = os.path.join(args.folder, filename)
+                files_to_process.append(file_path)
                 tasks.append(process_invoice(file_path, args.output_dir, normalized_agent, raw_agent, lock, args.move))
 
         # Run all tasks concurrently and wait for them to complete
-        logging.info(f"--- Found {len(tasks)} PDF files. Processing concurrently... ---")
-        await asyncio.gather(*tasks)
-        logging.info("\n--- All files processed. ---")
+        if tasks:
+            logging.info(f"--- Found {len(tasks)} PDF files. Processing concurrently... ---")
+            await asyncio.gather(*tasks)
+            logging.info("\n--- All files processed. ---")
+        else:
+            logging.info(f"No PDF files found in '{args.folder}'.")
 
     total_duration = time.time() - total_start_time
     logging.info(f"--- Total execution time: {total_duration:.2f} seconds ---")
@@ -285,6 +279,7 @@ async def main():
             run_info = {
                 "timestamp": datetime.now().isoformat(),
                 "arguments": vars(args),
+                "files_processed": len(files_to_process),
                 "total_duration_seconds": round(total_duration, 2)
             }
             

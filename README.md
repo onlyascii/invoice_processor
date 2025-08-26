@@ -1,30 +1,36 @@
 # Invoice Processor
 
-A simple project to process invoices from various formats.
+A script to intelligently process and rename PDF invoices using a local AI model.
 
 ## Description
 
-This tool is designed to automate the extraction of data from invoice documents. It can parse files like PDFs and images, pull out key information such as invoice number, date, total amount, and vendor details, and then save the extracted data into a structured format like CSV or JSON.
+This tool automates the processing of PDF invoices. It uses an AI model (via Ollama) to extract key information like the vendor, invoice date, item details, and total amounts. Based on this extracted data, it renames the invoice files into a clean, standardized format.
+
+A key feature is its ability to learn and manage vendor names. It maintains a `vendors.yaml` file, automatically creating canonical vendor names and mapping verbatim names from invoices as aliases. This ensures consistent naming across all your documents.
 
 ## Features
 
-- Extracts data from PDF, PNG, and JPG files.
-- Validates key invoice fields.
-- Exports extracted data to CSV or JSON.
-- Simple command-line interface.
+- Extracts structured data from PDF invoices using a local AI model.
+- Intelligently renames files based on extracted content (Vendor, Date, Item Count, Category, Amount).
+- Automatically learns and catalogs vendor names and their aliases in `vendors.yaml`.
+- Processes a single file or an entire folder of invoices concurrently.
+- Can move or copy processed files to a designated output directory.
+- Logs processing activity and performance metrics for both individual files and the total run.
+- Simple and flexible command-line interface.
 
 ## Getting Started
 
 ### Prerequisites
 
 - Python 3.13+
-- uv
+- [uv](https://github.com/astral-sh/uv)
+- A running [Ollama](https://ollama.com/) instance with a model (e.g., `qwen2`, `llama3`).
 
 ### Installation
 
 1.  Clone the repository:
     ```sh
-    git clone https://github.com/your-username/invoice_processor.git
+    git clone https://github.com/onlyascii/invoice_processor.git
     ```
 2.  Navigate to the project directory:
     ```sh
@@ -37,11 +43,31 @@ This tool is designed to automate the extraction of data from invoice documents.
 
 ## Usage
 
-To process an invoice, run the main script from your terminal:
+The script can process a single file or all PDF files in a directory. To run the script, use the `uv run` command, which executes commands within the project's managed virtual environment.
+
+### Process a single invoice
 
 ```sh
-python main.py --input path/to/invoice.pdf --output output.csv
+uv run python main.py --file path/to/your/invoice.pdf --output-dir processed
 ```
+
+### Process all invoices in a folder
+
+This will process all `.pdf` files in the `invoices_to_process` directory concurrently.
+
+```sh
+uv run python main.py --folder path/to/invoices_to_process --output-dir processed
+```
+
+### Command-Line Arguments
+
+-   `--file <path>`: Path to a single PDF file to process.
+-   `--folder <path>`: Path to a folder containing PDF files to process.
+-   `--output-dir <path>`: The directory to save renamed files. Defaults to `processed_invoices`.
+-   `--model <model_name>`: The Ollama model to use. Defaults to `qwen2`.
+-   `--move`: Move processed files to the output directory instead of copying them.
+-   `--log-file <path>`: Path for the main processing log. Defaults to `processing_log.txt`.
+-   `--args-log-file <path>`: Path for a JSON log of script arguments and performance, including the number of files processed. Disabled by default.
 
 ## Contributing
 

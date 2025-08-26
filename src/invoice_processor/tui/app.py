@@ -55,6 +55,7 @@ class InvoiceProcessorApp(App):
         Binding("p", "process_selected", "Process Selected"),
         Binding("space", "toggle_selection", "Toggle Selection", show=False),
         Binding("r", "refresh_files", "Refresh Files"),
+        Binding("a", "select_all", "Select All"),
     ]
 
     def __init__(
@@ -248,3 +249,21 @@ class InvoiceProcessorApp(App):
             # Refresh file list to show updated state (especially if files were moved)
             self.refresh_file_list()
             logging.info("[bold blue]File list updated.[/bold blue]")
+
+    def action_select_all(self) -> None:
+        """Select all files in the list."""
+        if self.is_processing:
+            self.query_one(RichLog).write(
+                Text.from_markup("[bold red]Cannot change selection while processing.[/bold red]")
+            )
+            return
+
+        selection_list = self.query_one(SelectionList)
+        
+        # Select all options
+        for option in selection_list._options:
+            selection_list.select(option.id)
+        
+        self.query_one(RichLog).write(
+            Text.from_markup(f"[bold green]Selected all {len(selection_list._options)} files.[/bold green]")
+        )

@@ -11,15 +11,18 @@ import asyncio
 from asyncio import Lock
 import time
 import logging
+import psutil
 
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from textual.app import App, ComposeResult
-from textual.containers import Container
-from textual.widgets import Header, Footer, RichLog, SelectionList
+from textual.containers import Container, Vertical
+from textual.widgets import Header, Footer, RichLog, SelectionList, ProgressBar, Static
 from textual.binding import Binding
 from textual import work
+from rich.text import Text
+from rich.markup import render
 
 # --- Model for Raw Vendor Extraction ---
 class RawVendor(BaseModel):
@@ -194,9 +197,61 @@ class TuiLogHandler(logging.Handler):
         self.rich_log = rich_log
 
     def emit(self, record):
-        msg = self.format(record)
-        # Use the write method to add the log message to the widget
-        self.rich_log.write(msg)
+        # Use the raw message and render Rich markup
+        msg = record.getMessage()
+        # Parse Rich markup and create a Rich Text object
+        try:
+            rich_text = Text.from_markup(msg)
+            self.rich_log.write(rich_text)
+        except Exception:
+            # If markup parsing fails, fall back to plain text
+            self.rich_log.write(msg)
+
+class SystemMonitor:
+    """A class to monitor system resources."""
+
+    @staticmethod
+    def get_system_stats() -> dict:
+        """Get current system resource usage."""
+        process = psutil.Process()
+
+        # CPU usage
+        cpu_percent = psutil.cpu_percent(interval=None)
+
+        # Memory usage
+        memory = psutil.virtual_memory()
+        process_memory = process.memory_info()
+
+        # GPU memory (if available)
+        gpu_info = "N/A"
+        try:
+            import GPUtil
+            gpus = GPUtil.getGPUs()
+            if gpus:
+                gpu = gpus[0]  # Get first GPU
+                gpu_info = f"{gpu.memoryUsed}MB/{gpu.memoryTotal}MB ({gpu.memoryUtil*100:.1f}%)"
+        except ImportError:
+            # Try nvidia-ml-py as alternative
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                gpu_memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                used_mb = gpu_memory.used // 1024 // 1024
+                total_mb = gpu_memory.total // 1024 // 1024
+                usage_percent = (gpu_memory.used / gpu_memory.total) * 100
+                gpu_info = f"{used_mb}MB/{total_mb}MB ({usage_percent:.1f}%)"
+            except:
+                gpu_info = "No GPU"
+
+        return {
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory.percent,
+            "memory_used_gb": memory.used / (1024**3),
+            "memory_total_gb": memory.total / (1024**3),
+            "process_memory_mb": process_memory.rss / (1024**2),
+            "gpu_memory": gpu_info
+        }
 
 class InvoiceProcessorApp(App):
     """A Textual app for interactively processing invoices."""
@@ -210,8 +265,22 @@ class InvoiceProcessorApp(App):
         width: 40%;
         border-right: solid $accent;
     }
-    RichLog {
+    #right-panel {
         width: 60%;
+        layout: vertical;
+    }
+    RichLog {
+        height: 1fr;
+    }
+    #progress-container {
+        height: 3;
+        margin: 1 0;
+    }
+    #status-bar {
+        height: 1;
+        background: $surface;
+        color: $text;
+        text-align: center;
     }
     """
 
@@ -219,34 +288,41 @@ class InvoiceProcessorApp(App):
         Binding("q", "quit", "Quit", priority=True),
         Binding("p", "process_selected", "Process Selected"),
         Binding("space", "toggle_selection", "Toggle Selection", show=False),
+        Binding("r", "refresh_files", "Refresh Files"),
     ]
 
-    def __init__(self, files_to_process: list[str], context: ProcessingContext, move_files: bool, output_dir: str):
+    def __init__(self, folder_path: str, context: ProcessingContext, move_files: bool, output_dir: str):
         super().__init__()
-        self.files_to_process = files_to_process
+        self.folder_path = folder_path
         self.processing_context = context
         self.move_files = move_files
         self.output_dir = output_dir
         self.selected_files = set()
+        self.files_to_process = []
+        self.is_processing = False
+        self.total_files_to_process = 0
+        self.files_processed = 0
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Header()
         with Container(id="main-container"):
             yield SelectionList[str](id="file_list")
-            yield RichLog(id="log_window", wrap=True, highlight=True)
+            with Vertical(id="right-panel"):
+                with Container(id="progress-container"):
+                    yield ProgressBar(id="progress_bar", show_eta=True)
+                yield RichLog(id="log_window", wrap=True, highlight=True)
+                yield Static("", id="status-bar")
         yield Footer()
 
     def on_mount(self) -> None:
         """Called when the app is mounted."""
-        selection_list = self.query_one(SelectionList)
-        for file_path in self.files_to_process:
-            selection_list.add_option((os.path.basename(file_path), file_path))
+        self.refresh_file_list()
 
         # Configure logging to use the TUI handler
         log_window = self.query_one(RichLog)
         tui_handler = TuiLogHandler(log_window)
-        tui_handler.setFormatter(logging.Formatter('%(message)s'))
+        # No formatter needed - we use the raw message to preserve Rich markup
 
         # We remove all other handlers to only log to the TUI
         root_logger = logging.getLogger()
@@ -255,37 +331,123 @@ class InvoiceProcessorApp(App):
         root_logger.addHandler(tui_handler)
         root_logger.setLevel(logging.INFO)
 
-        log_window.write("App initialized. Press 'space' to select files, 'p' to process, 'q' to quit.")
+        log_window.write("App initialized. Press 'space' to select files, 'p' to process, 'r' to refresh, 'q' to quit.")
+
+        # Start system monitoring
+        self.update_system_monitor()
+
+    def refresh_file_list(self) -> None:
+        """Refresh the file list from the folder."""
+        selection_list = self.query_one(SelectionList)
+        selection_list.clear_options()
+
+        if not os.path.isdir(self.folder_path):
+            self.query_one(RichLog).write(Text.from_markup(f"[bold red]Error: Folder not found at '{self.folder_path}'[/bold red]"))
+            return
+
+        self.files_to_process = [
+            os.path.join(self.folder_path, f)
+            for f in sorted(os.listdir(self.folder_path))
+            if f.lower().endswith(".pdf")
+        ]
+
+        if not self.files_to_process:
+            self.query_one(RichLog).write(Text.from_markup(f"[bold yellow]No PDF files found in '{self.folder_path}'.[/bold yellow]"))
+            return
+
+        for file_path in self.files_to_process:
+            selection_list.add_option((os.path.basename(file_path), file_path))
+
+        self.query_one(RichLog).write(Text.from_markup(f"[bold]Found {len(self.files_to_process)} PDF files.[/bold]"))
+
+    def action_refresh_files(self) -> None:
+        """Refresh the file list."""
+        if not self.is_processing:
+            self.refresh_file_list()
+            self.query_one(RichLog).write(Text.from_markup("[bold blue]File list refreshed.[/bold blue]"))
+        else:
+            self.query_one(RichLog).write(Text.from_markup("[bold red]Cannot refresh while processing.[/bold red]"))
+
+    @work(exclusive=False, group="system_monitor")
+    async def update_system_monitor(self) -> None:
+        """Update system resource monitoring in the status bar."""
+        while True:
+            try:
+                # Check if app is still running
+                if not self.is_running:
+                    break
+
+                stats = SystemMonitor.get_system_stats()
+                status_text = (
+                    f"CPU: {stats['cpu_percent']:.1f}% | "
+                    f"Memory: {stats['memory_percent']:.1f}% "
+                    f"({stats['memory_used_gb']:.1f}GB/{stats['memory_total_gb']:.1f}GB) | "
+                    f"Process: {stats['process_memory_mb']:.1f}MB | "
+                    f"GPU: {stats['gpu_memory']}"
+                )
+                self.query_one("#status-bar", Static).update(status_text)
+            except Exception:
+                # Silently handle any errors in system monitoring
+                pass
+            await asyncio.sleep(2)  # Update every 2 seconds
 
     def action_toggle_selection(self) -> None:
         """Toggle the selection of the currently highlighted file."""
+        if self.is_processing:
+            self.query_one(RichLog).write(Text.from_markup("[bold red]Cannot change selection while processing.[/bold red]"))
+            return
+
         selection_list = self.query_one(SelectionList)
         if selection_list.highlighted_child:
             selection_list.toggle_option(selection_list.highlighted_child.id)
 
     def action_process_selected(self) -> None:
         """Start processing the selected files."""
+        if self.is_processing:
+            self.query_one(RichLog).write(Text.from_markup("[bold red]Processing already in progress.[/bold red]"))
+            return
+
         selection_list = self.query_one(SelectionList)
         selected_items = selection_list.selected
 
         if not selected_items:
-            self.query_one(RichLog).write("[bold red]No files selected. Press 'space' to select files.[/bold red]")
+            self.query_one(RichLog).write(Text.from_markup("[bold red]No files selected. Press 'space' to select files.[/bold red]"))
             return
 
+        self.total_files_to_process = len(selected_items)
+        self.files_processed = 0
+        self.is_processing = True
+
+        # Reset progress bar
+        progress_bar = self.query_one(ProgressBar)
+        progress_bar.update(total=self.total_files_to_process, progress=0)
+
         files_to_run = selected_items
-        self.query_one(RichLog).write(f"[bold]Starting processing for {len(files_to_run)} files...[/bold]")
+        self.query_one(RichLog).write(Text.from_markup(f"[bold]Starting processing for {len(files_to_run)} files...[/bold]"))
         self.run_processing(files_to_run)
 
     @work(exclusive=True, group="processing")
     async def run_processing(self, files: list[str]) -> None:
         """The background worker for processing invoice files."""
-        tasks = []
-        for file_path in files:
-            tasks.append(process_invoice(file_path, self.output_dir, self.processing_context, self.move_files))
+        try:
+            for i, file_path in enumerate(files):
+                logging.info(f"Processing file {i+1}/{len(files)}: {os.path.basename(file_path)}")
 
-        await asyncio.gather(*tasks)
+                # Process the file
+                await process_invoice(file_path, self.output_dir, self.processing_context, self.move_files)
 
-        logging.info("\n--- [bold green]All selected files processed.[/bold green] ---")
+                # Update progress
+                self.files_processed += 1
+                progress_bar = self.query_one(ProgressBar)
+                progress_bar.update(progress=self.files_processed)
+
+            logging.info("\n--- [bold green]All selected files processed.[/bold green] ---")
+
+        finally:
+            self.is_processing = False
+            # Refresh file list to show updated state (especially if files were moved)
+            self.refresh_file_list()
+            logging.info("[bold blue]File list updated.[/bold blue]")
 
 
 async def main():
@@ -344,18 +506,8 @@ async def main():
             print(f"Error: Folder not found at '{args.folder}'")
             return
 
-        files_to_process = [
-            os.path.join(args.folder, f)
-            for f in sorted(os.listdir(args.folder))
-            if f.lower().endswith(".pdf")
-        ]
-
-        if not files_to_process:
-            print(f"No PDF files found in '{args.folder}'.")
-            return
-
         app = InvoiceProcessorApp(
-            files_to_process=files_to_process,
+            folder_path=args.folder,
             context=context,
             move_files=args.move,
             output_dir=args.output_dir

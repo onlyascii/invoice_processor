@@ -97,14 +97,15 @@ def sanitize_filename_part(part: str) -> str:
     return sanitized_part.strip('._ ')
 
 # --- Dynamic Enum and Pydantic Models ---
-vendors_data = load_vendors_data()
-canonical_vendor_names = [v.get("name") for v in vendors_data.get("vendors", []) if v.get("name")]
-if not canonical_vendor_names:
-    canonical_vendor_names = ["Unknown"]
-VendorEnum = Enum("VendorEnum", {name: name for name in canonical_vendor_names})
+# We are removing the dynamic Enum creation to allow the AI to propose new canonical names.
+# vendors_data = load_vendors_data()
+# canonical_vendor_names = [v.get("name") for v in vendors_data.get("vendors", []) if v.get("name")]
+# if not canonical_vendor_names:
+#     canonical_vendor_names = ["Unknown"]
+# VendorEnum = Enum("VendorEnum", {name: name for name in canonical_vendor_names})
 
 class InvoiceDetails(BaseModel):
-    vendor: VendorEnum = Field(..., description="The canonical vendor name, chosen from the provided list.")
+    vendor: str = Field(..., description="A clean, canonical name for the vendor (e.g., 'Amazon Web Services', 'Google', 'Microsoft').")
     invoice_date: date = Field(..., description="The date the invoice was issued in YYYY-MM-DD format.")
     item_count: int = Field(..., description="The total number of distinct items or services listed.")
     item_category: str = Field(..., description="A brief, general category for the items, e.g., 'books', 'computer hardware', 'software subscription', 'unknown'.")
@@ -116,7 +117,7 @@ class InvoiceDetails(BaseModel):
         date_str = self.invoice_date.strftime("%Y%m%d")
 
         # Sanitize the parts of the filename that can contain special characters
-        safe_vendor = sanitize_filename_part(self.vendor.value)
+        safe_vendor = sanitize_filename_part(self.vendor)
         safe_category = sanitize_filename_part(self.item_category)
 
         return f"{safe_vendor}-{date_str}-{self.item_count}-{safe_category}-{self.total_amount:.2f}-{self.total_vat:.2f}.pdf"
@@ -137,8 +138,8 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
         # --- 1. First Pass: Normalize and Extract Details (Async) ---
         norm_prompt = (
             f"From the invoice text below, extract the required information. "
-            f"For the vendor, you must choose one of the following canonical names: {canonical_vendor_names}. "
-            f"Map the vendor found in the text to the most appropriate name from that list.\n\n"
+            f"For the vendor, generate a clean, simplified canonical name. For example, if the text says "
+            f"'Amazon Business EU S.à.r.l, UK Branch', the canonical name should be 'Amazon Business'.\n\n"
             f"Invoice Text:\n{text_content}"
         )
         normalized_result = await normalized_agent.run(norm_prompt)
@@ -156,7 +157,7 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
         if raw_result and raw_result.output and normalized_result and normalized_result.output:
             await update_aliases_if_needed(
                 raw_name=raw_result.output.verbatim_vendor_name,
-                normalized_name=normalized_result.output.vendor.value,
+                normalized_name=normalized_result.output.vendor,
                 lock=lock
             )
             new_filename = normalized_result.output.to_filename()
@@ -177,14 +178,25 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
     except Exception as e:
         logging.error(f"❌ An error occurred while processing {os.path.basename(file_path)}: {e}")
     finally:
-        duration = time.time() - start_time
-        logging.info(f"Finished processing {os.path.basename(file_path)} in {duration:.2f} seconds.")
+        # This block ensures the log is written even if errors occur during processing.
+        end_time = time.time()
+        total_duration = end_time - start_time
+        logging.info(f"🏁 Finished processing run in {total_duration:.2f} seconds.")
 
+        # Log arguments and performance summary
+        if args.args_log_file:
+            # The list of files to process was determined at the start of main()
+            files_processed_count = len(files_to_process)
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "arguments": {k: v for k, v in vars(args).items()},
+                "files_processed": files_processed_count,
+                "total_duration_seconds": round(total_duration, 2)
+            }
+            log_arguments(args.args_log_file, log_entry)
 
 async def main():
-    parser = argparse.ArgumentParser(description="Extracts invoice data from PDF files and renames them.")
-
-    # Create a mutually exclusive group. One of these arguments is required.
+    parser = argparse.ArgumentParser(description="Process one or more invoices using an AI model.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--file", type=str, help="The path to a single PDF file to be processed.")
     group.add_argument("--folder", type=str, help="The path to a folder containing PDF files to be processed.")

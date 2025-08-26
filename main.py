@@ -93,7 +93,7 @@ class InvoiceDetails(BaseModel):
 
         return f"{safe_vendor}-{date_str}-{self.item_count}-{safe_category}-{self.total_amount:.2f}-{self.total_vat:.2f}.pdf"
 
-async def process_invoice(file_path: str, output_dir: str, normalized_agent: Agent[None, InvoiceDetails], raw_agent: Agent[None, RawVendor], lock: Lock) -> None:
+async def process_invoice(file_path: str, output_dir: str, normalized_agent: Agent[None, InvoiceDetails], raw_agent: Agent[None, RawVendor], lock: Lock, move_file: bool = False) -> None:
     """Asynchronously processes a single PDF file using shared agents and a file lock."""
     try:
         print(f"Starting processing for: {os.path.basename(file_path)}")
@@ -135,11 +135,15 @@ async def process_invoice(file_path: str, output_dir: str, normalized_agent: Age
             print(f"❌ Could not generate filename for {os.path.basename(file_path)} due to incomplete AI response.")
             return
 
-        # --- 4. Copy file to output directory ---
+        # --- 4. Move or copy file to output directory ---
         os.makedirs(output_dir, exist_ok=True)
         destination_path = os.path.join(output_dir, new_filename)
-        shutil.copy(file_path, destination_path)
-        print(f"✅ Successfully processed and saved: {new_filename}")
+        if move_file:
+            shutil.move(file_path, destination_path)
+            print(f"✅ Successfully processed and moved: {new_filename}")
+        else:
+            shutil.copy(file_path, destination_path)
+            print(f"✅ Successfully processed and copied: {new_filename}")
 
     except Exception as e:
         print(f"❌ An error occurred while processing {os.path.basename(file_path)}: {e}")
@@ -159,6 +163,11 @@ async def main():
         default="processed_invoices",
         help="The directory to save the renamed invoice files. Defaults to 'processed_invoices'."
     )
+    parser.add_argument(
+        "--move",
+        action="store_true",
+        help="Move successfully processed files to the output directory instead of copying."
+    )
     args = parser.parse_args()
 
     # --- Create shared resources once, including the lock ---
@@ -169,7 +178,7 @@ async def main():
 
 
     if args.file:
-        await process_invoice(args.file, args.output_dir, normalized_agent, raw_agent, lock)
+        await process_invoice(args.file, args.output_dir, normalized_agent, raw_agent, lock, args.move)
     elif args.folder:
         if not os.path.isdir(args.folder):
             print(f"Error: Folder not found at '{args.folder}'")
@@ -180,7 +189,7 @@ async def main():
         for filename in sorted(os.listdir(args.folder)):
             if filename.lower().endswith(".pdf"):
                 file_path = os.path.join(args.folder, filename)
-                tasks.append(process_invoice(file_path, args.output_dir, normalized_agent, raw_agent, lock))
+                tasks.append(process_invoice(file_path, args.output_dir, normalized_agent, raw_agent, lock, args.move))
 
         # Run all tasks concurrently and wait for them to complete
         print(f"--- Found {len(tasks)} PDF files. Processing concurrently... ---")

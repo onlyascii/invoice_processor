@@ -232,6 +232,10 @@ async def main():
     console_handler.setFormatter(logging.Formatter('%(message)s')) # Console logs are simpler
     logging.getLogger().addHandler(console_handler)
 
+    # Silence noisy loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("ollama").setLevel(logging.WARNING)
+
     total_start_time = time.time()
 
     # --- Create shared resources once, including the lock ---

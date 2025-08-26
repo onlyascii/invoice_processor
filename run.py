@@ -8,10 +8,11 @@ import sys
 import os
 import asyncio
 
-# Add the src directory to Python path so we can import our modules
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Add the project root to Python path so we can import our modules
+project_root = os.path.dirname(__file__)
+sys.path.insert(0, project_root)
 
-from invoice_processor.cli import main
+from src.invoice_processor.cli import main
 
 if __name__ == "__main__":
     asyncio.run(main())

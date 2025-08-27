@@ -12,3 +12,4 @@ wheels/
 vendors.yaml
 .DS_Store
 /processed_invoices
+*.cast

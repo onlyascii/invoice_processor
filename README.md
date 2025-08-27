@@ -2,6 +2,8 @@
 
 An AI-powered invoice processing and organization system that automatically extracts information from PDF invoices and organizes them with structured filenames.
 
+![Demo](docs/demo/demo.gif)
+
 ## Features
 
 - **AI-Powered Extraction**: Uses local AI models via Ollama to extract vendor details, dates, amounts, and categories

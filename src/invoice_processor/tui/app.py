@@ -107,6 +107,9 @@ class InvoiceProcessorApp(App):
         self._log_initial_message()
         self.update_system_monitor()
 
+        # Set focus on the file list for immediate keyboard navigation
+        self.query_one(SelectionList).focus()
+
     def _setup_logging(self) -> None:
         """Set up logging to use the TUI handler."""
         log_window = self.query_one(RichLog)
@@ -259,11 +262,11 @@ class InvoiceProcessorApp(App):
             return
 
         selection_list = self.query_one(SelectionList)
-        
+
         # Select all options
         for option in selection_list._options:
             selection_list.select(option.id)
-        
+
         self.query_one(RichLog).write(
             Text.from_markup(f"[bold green]Selected all {len(selection_list._options)} files.[/bold green]")
         )

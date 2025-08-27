@@ -72,6 +72,9 @@ python -m src.invoice_processor --folder /path/to/invoices --move
 
 # Custom model and output directory
 python -m src.invoice_processor --folder /path/to/invoices --model qwen3 --output-dir processed
+
+# Override vendor name for all invoices (AI-detected vendors become aliases)
+python -m src.invoice_processor --folder /path/to/invoices --vendor-override "My Custom Vendor"
 ```
 
 #### 2. Standalone Script
@@ -145,6 +148,20 @@ vendors:
 ```
 
 This file is automatically updated as new vendors are discovered.
+
+### Vendor Override
+
+You can override the vendor name for all processed invoices using the `--vendor-override` option:
+
+```bash
+python -m src.invoice_processor --folder /path/to/invoices --vendor-override "My Company Name"
+```
+
+When using vendor override:
+- All invoices will use the specified vendor name in filenames
+- AI-detected vendor names become aliases for the override name
+- Raw vendor names from PDFs also become aliases
+- The vendor configuration is automatically updated
 
 ## Output Format
 

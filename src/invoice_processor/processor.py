@@ -18,16 +18,18 @@ from .utils import ensure_directory_exists, get_file_basename
 class InvoiceProcessor:
     """Main invoice processing class."""
 
-    def __init__(self, context: ProcessingContext, vendors_file: str = "vendors.yaml"):
+    def __init__(self, context: ProcessingContext, vendors_file: str = "vendors.yaml", vendor_override: Optional[str] = None):
         """
         Initialize the invoice processor.
 
         Args:
             context: AI processing context
             vendors_file: Path to the vendors configuration file
+            vendor_override: Optional vendor name to override AI-detected vendors
         """
         self.context = context
         self.vendors_file = vendors_file
+        self.vendor_override = vendor_override
 
     async def process_single_invoice(
         self,
@@ -64,11 +66,33 @@ class InvoiceProcessor:
                 logging.error(f"Failed to extract details for {filename}.")
                 return None
 
-            # Update vendor configuration
-            await self._update_vendor_config(
-                raw_result.output.verbatim_vendor_name,
-                normalized_result.output.vendor
-            )
+            # Handle vendor override
+            if self.vendor_override:
+                # Store AI-detected vendor as the raw vendor name for alias tracking
+                ai_detected_vendor = normalized_result.output.vendor
+                # Update the normalized result to use the override
+                normalized_result.output.vendor = self.vendor_override
+
+                # Update vendor configuration: override becomes canonical, AI-detected becomes alias
+                await self._update_vendor_config(
+                    ai_detected_vendor,  # AI-detected vendor becomes the alias
+                    self.vendor_override  # Override becomes the canonical name
+                )
+
+                # Also store the original raw vendor name as an alias
+                if raw_result.output.verbatim_vendor_name != ai_detected_vendor:
+                    await self._update_vendor_config(
+                        raw_result.output.verbatim_vendor_name,
+                        self.vendor_override
+                    )
+
+                logging.info(f"Using vendor override '{self.vendor_override}' instead of AI-detected '{ai_detected_vendor}'")
+            else:
+                # Normal processing: update vendor configuration with AI results
+                await self._update_vendor_config(
+                    raw_result.output.verbatim_vendor_name,
+                    normalized_result.output.vendor
+                )
 
             # Generate new filename and process file
             new_filename = normalized_result.output.to_filename()

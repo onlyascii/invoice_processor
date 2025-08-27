@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import os
-from typing import Set
+from typing import Set, Optional
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical
@@ -63,7 +63,8 @@ class InvoiceProcessorApp(App):
         folder_path: str,
         context: ProcessingContext,
         move_files: bool,
-        output_dir: str
+        output_dir: str,
+        vendor_override: Optional[str] = None
     ):
         """
         Initialize the TUI application.
@@ -73,20 +74,22 @@ class InvoiceProcessorApp(App):
             context: AI processing context
             move_files: Whether to move or copy processed files
             output_dir: Output directory for processed files
+            vendor_override: Optional vendor name to override AI-detected vendors
         """
         super().__init__()
         self.folder_path = folder_path
         self.processing_context = context
         self.move_files = move_files
         self.output_dir = output_dir
+        self.vendor_override = vendor_override
         self.selected_files: Set[str] = set()
         self.files_to_process: list[str] = []
         self.is_processing = False
         self.total_files_to_process = 0
         self.files_processed = 0
 
-        # Initialize processor
-        self.processor = InvoiceProcessor(context)
+        # Initialize processor with vendor override
+        self.processor = InvoiceProcessor(context, vendor_override=vendor_override)
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -125,10 +128,16 @@ class InvoiceProcessorApp(App):
     def _log_initial_message(self) -> None:
         """Log the initial welcome message."""
         log_window = self.query_one(RichLog)
-        log_window.write(
+
+        welcome_msg = (
             "App initialized. Press 'space' to select files, 'p' to process, "
             "'r' to refresh, 'q' to quit."
         )
+
+        if self.vendor_override:
+            welcome_msg += f"\n[bold yellow]Vendor Override Active:[/bold yellow] All invoices will use vendor name '{self.vendor_override}'"
+
+        log_window.write(Text.from_markup(welcome_msg))
 
     def refresh_file_list(self) -> None:
         """Refresh the file list from the folder."""

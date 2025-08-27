@@ -13,3 +13,4 @@ vendors.yaml
 .DS_Store
 /processed_invoices
 *.cast
+processing_log.txt

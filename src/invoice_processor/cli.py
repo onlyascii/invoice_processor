@@ -69,6 +69,13 @@ class CLIInterface:
             help="Move successfully processed files to the output directory instead of copying."
         )
 
+        # Vendor configuration
+        parser.add_argument(
+            "--vendor-override",
+            type=str,
+            help="Override the vendor name for all processed invoices. The AI-detected vendor will become an alias."
+        )
+
         # Logging configuration
         parser.add_argument(
             "--log-file",
@@ -122,7 +129,8 @@ class CLIInterface:
             folder_path=args.folder,
             context=context,
             move_files=args.move,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            vendor_override=getattr(args, 'vendor_override', None)
         )
         await app.run_async()
 
@@ -131,7 +139,7 @@ class CLIInterface:
         self._setup_logging(args.log_file)
 
         total_start_time = time.time()
-        processor = InvoiceProcessor(context)
+        processor = InvoiceProcessor(context, vendor_override=getattr(args, 'vendor_override', None))
         files_processed = []
 
         if args.file:
